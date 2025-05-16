@@ -59,6 +59,10 @@ data:
     dasel put -f /etc/containerd/config.toml -r toml '.plugins.io\.containerd\.image-verifier\.v1\.bindir.max_verifiers' -t int -v '10'
     dasel put -f /etc/containerd/config.toml -r toml '.plugins.io\.containerd\.image-verifier\.v1\.bindir.verifier_timeout' -t string -v '10s'
 
+    echo "======"
+    cat /etc/containerd/config.toml
+    echo "======"
+
     touch /opt/sentinel
     systemctl restart containerd
 ---
