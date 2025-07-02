@@ -15,7 +15,7 @@ spec:
       serviceAccountName: watcher-sa
       containers:
       - name: watcher
-        image: jinzha1.azurecr.io/ratify-containerd/watcher:test1 # TODO: Replace with actual watcher image
+        image: jinzha1.azurecr.io/ratify-containerd/watcher:test # TODO: Replace with actual watcher image
         imagePullPolicy: Always
         volumeMounts:
         - name: shared-data

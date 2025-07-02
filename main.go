@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,6 +38,9 @@ const (
 
 	// namespace to watch ConfigMaps in， TODO: make this configurable
 	namespace = "default"
+
+	// path to shared ConfigMap, TODO: make this configurable
+	sharedVolumePath = "/shared-data"
 )
 
 func main() {
@@ -123,7 +127,13 @@ func processConfigMaps(clientset *kubernetes.Clientset) error {
 	if nameChanged || contentChanged {
 		// on first run or if anything changed, process and write result
 		logrus.Info("ConfigMap set or content changed, processing...")
-		// placeholder for processing logic
+
+		// process and write ConfigMap data to shared volume
+		err := writeConfigMapsToSharedVolume(scopedConfigMaps)
+		if err != nil {
+			return fmt.Errorf("failed to write ConfigMaps to shared volume: %v", err)
+		}
+
 		logrus.Infof("Processing %d ConfigMaps", len(scopedConfigMaps))
 		logrus.Infof("Wrote processed config map data to shared volume")
 		// update state
@@ -148,5 +158,46 @@ func writeFile(filePath string, contents string) error {
 		return err
 	}
 	logrus.Infof("successfully wrote to file %s", filePath)
+	return nil
+}
+
+// writeConfigMapsToSharedVolume writes ConfigMap data to the shared volume
+func writeConfigMapsToSharedVolume(configMaps []*corev1.ConfigMap) error {
+	// collect all scopes from ConfigMaps
+	allScopes := make([]string, 0)
+
+	for _, cm := range configMaps {
+		// process each ConfigMap's data
+		for key, value := range cm.Data {
+			logrus.Infof("Processing ConfigMap %s, key: %s", cm.Name, key)
+
+			// try to parse JSON data as ScopedConfig
+			var config ScopedConfig
+			if err := json.Unmarshal([]byte(value), &config); err != nil {
+				logrus.Warnf("Failed to parse JSON from ConfigMap %s, key %s: %v", cm.Name, key, err)
+				continue
+			}
+
+			// collect scopes from this ConfigMap
+			allScopes = append(allScopes, config.Scopes...)
+		}
+	}
+
+	// convert to optimized format for efficient matching
+	optimizedConfig := ToOptimizedFromScopes(allScopes)
+
+	// marshal to JSON
+	configJSON, err := json.MarshalIndent(optimizedConfig, "", "")
+	if err != nil {
+		return fmt.Errorf("failed to marshal combined config to JSON: %v", err)
+	}
+
+	// write to shared volume
+	configFilePath := filepath.Join(sharedVolumePath, "ratify-config.json")
+	if err := writeFile(configFilePath, string(configJSON)); err != nil {
+		return fmt.Errorf("failed to write config to shared volume: %v", err)
+	}
+
+	logrus.Infof("Successfully wrote combined configuration to %s with %d unique scopes", configFilePath, len(optimizedConfig.ScopeMap))
 	return nil
 }
