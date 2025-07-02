@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: watcher
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: watcher
+  template:
+    metadata:
+      labels:
+        app: watcher
+    spec:
+      serviceAccountName: watcher-sa
+      containers:
+      - name: watcher
+        image: jinzha1.azurecr.io/ratify-containerd/watcher:test1 # TODO: Replace with actual watcher image
+        imagePullPolicy: Always
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared-data
+      volumes:
+      - name: shared-data
+        hostPath:
+          path: /var/shared-data

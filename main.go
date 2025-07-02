@@ -21,128 +21,123 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/watch"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
 )
 
 const (
-	kubletConfigPath = "/etc/kubernetes/kubelet.conf"
-	configMapName    = "ratify-config"
-	filePathPrefix   = ".ratify"
-	defaultHomeDir   = "/root"
-	certsFolderName  = "certs"
+	// prefix of ConfigMap names to watch
+	configMapPrefix = "scoped-config-"
+
+	// namespace to watch ConfigMaps in， TODO: make this configurable
+	namespace = "default"
 )
 
-var homedir string
-
 func main() {
-	logrus.Debugf("using kubeconfig: %s", kubletConfigPath)
-	var err error
-	homedir, err = os.UserHomeDir()
-	if homedir == "" || err != nil {
-		logrus.Errorf("Unable to get home directory. Using default path %s", defaultHomeDir)
-		homedir = defaultHomeDir
-	}
-	logrus.Debugf("using home directory: %s", homedir)
-
-	// uses the current context in kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", kubletConfigPath)
+	kubeconfig := filepath.Join(homedir.HomeDir(), ".kube", "config")
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	// creates the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		logrus.Errorf("failed to create clientset: %v", err)
-		return
-	}
-
-	// watch for changes in the ConfigMap
-	watchForChanges(clientset, "default")
-}
-
-// based on: https://github.com/ScarletTanager/configmap-watcher-example/blob/main/watch/watch.go
-// watchForChanges registers a watcher on the ConfigMap and listens for events
-func watchForChanges(clientset *kubernetes.Clientset, namespace string) {
-	for {
-		watcher, err := clientset.CoreV1().ConfigMaps(namespace).Watch(context.TODO(),
-			v1.SingleObject(v1.ObjectMeta{Name: configMapName, Namespace: namespace}))
+		logrus.Errorf("failed to build kubeconfig in %q: %v", kubeconfig, err)
+		logrus.Info("Attempting to use in-cluster configuration...")
+		config, err = clientcmd.BuildConfigFromFlags("", "")
 		if err != nil {
-			panic("unable to create watcher")
-		}
-		logrus.Info("watcher created")
-		updateConfigMap(watcher.ResultChan())
-	}
-}
-
-// updateConfigMap updates the files in the directory with the data from the ConfigMap
-// Listens for events on the eventChannel and updates the files accordingly
-func updateConfigMap(eventChannel <-chan watch.Event) {
-	for {
-		event, open := <-eventChannel
-		if open {
-			switch event.Type {
-			case watch.Added:
-				logrus.Info("configmap added")
-				fallthrough
-			case watch.Modified:
-				logrus.Info("configmap modified. writing to file(s)")
-				if modifiedConfigMap, ok := event.Object.(*corev1.ConfigMap); ok {
-					if len(modifiedConfigMap.Data) == 0 {
-						logrus.Warning("configmap has no data")
-						return
-					} else {
-						for filename, value := range modifiedConfigMap.Data {
-							// write value to file with name key
-							filePath := fmt.Sprintf("%s/%s/%s", homedir, filePathPrefix, filename)
-							if strings.Contains(filename, ".crt") {
-								filePath = fmt.Sprintf("%s/%s/%s/%s", homedir, filePathPrefix, certsFolderName, filename)
-							}
-							logrus.Debugf("writing to file %s", filePath)
-							err := writeFile(filePath, value)
-							if err != nil {
-								logrus.Errorf("failed to write to file: %v", err)
-							}
-						}
-					}
-				} else {
-					logrus.Error("unable to cast object to ConfigMap")
-				}
-			case watch.Deleted:
-				// delete the files associated with the ConfigMap
-				logrus.Info("configmap deleted. deleting file(s)")
-				if deletedConfigMap, ok := event.Object.(*corev1.ConfigMap); ok {
-					for filename := range deletedConfigMap.Data {
-						filePath := fmt.Sprintf("%s/%s/%s", homedir, filePathPrefix, filename)
-						logrus.Infof("deleting file %s", filePath)
-						err := os.Remove(filePath)
-						if err != nil {
-							logrus.Errorf("error deleting file %s: %v", filePath, err)
-						}
-					}
-				} else {
-					logrus.Error("unable to cast object to ConfigMap")
-				}
-			default:
-				// do nothing
-			}
-		} else {
-			// if eventChannel is closed, it means the server has closed the connection
+			logrus.Errorf("failed to build in-cluster kubeconfig: %v", err)
 			return
 		}
 	}
+	logrus.Infof("Using kubeconfig: %s", kubeconfig)
+
+	// create kubernetes clientset
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		logrus.Errorf("failed to create kubernetes clientset: %v", err)
+		return
+	}
+
+	// watch ConfigMaps and write to shared volume
+	for {
+		err := processConfigMaps(clientset)
+		if err != nil {
+			// log the error and continue processing
+			logrus.Errorf("Error processing ConfigMaps: %v", err)
+		}
+		time.Sleep(10 * time.Second) // wait before checking again
+	}
+}
+
+// state tracking
+var lastConfigMapNames = make(map[string]struct{})
+var lastConfigMapVersions = make(map[string]string)
+
+func processConfigMaps(clientset *kubernetes.Clientset) error {
+	// list ConfigMaps in the provided namespace
+	configMaps, err := clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list ConfigMaps: %v", err)
+	}
+
+	currentNames := make(map[string]struct{})
+	currentVersions := make(map[string]string)
+	scopedConfigMaps := make([]*corev1.ConfigMap, 0, len(configMaps.Items))
+	for _, cm := range configMaps.Items {
+		if strings.HasPrefix(cm.Name, configMapPrefix) {
+			currentNames[cm.Name] = struct{}{}
+			currentVersions[cm.Name] = cm.ResourceVersion
+			scopedConfigMaps = append(scopedConfigMaps, &cm)
+		}
+	}
+
+	// detect added/removed ConfigMaps
+	nameChanged := false
+	if len(currentNames) != len(lastConfigMapNames) {
+		logrus.Info("Quantity of ConfigMaps changed")
+		nameChanged = true
+	} else {
+		for name := range currentNames {
+			if _, ok := lastConfigMapNames[name]; !ok {
+				logrus.Infof("ConfigMap %s added", name)
+				nameChanged = true
+				break
+			}
+		}
+	}
+
+	// detect content changes if names didn't change
+	contentChanged := false
+	if !nameChanged {
+		for name, version := range currentVersions {
+			if lastConfigMapVersions[name] != version {
+				logrus.Infof("ConfigMap %s content changed (version %s -> %s)", name, lastConfigMapVersions[name], version)
+				contentChanged = true
+				break
+			}
+		}
+	}
+
+	if nameChanged || contentChanged {
+		// on first run or if anything changed, process and write result
+		logrus.Info("ConfigMap set or content changed, processing...")
+		// placeholder for processing logic
+		logrus.Infof("Processing %d ConfigMaps", len(scopedConfigMaps))
+		logrus.Infof("Wrote processed config map data to shared volume")
+		// update state
+		lastConfigMapNames = currentNames
+		lastConfigMapVersions = currentVersions
+	}
+	// watch changes to ConfigMaps
+	return nil
 }
 
 // writeFile writes the contents to the file at filePath
-// It creates the directory if it does not exist
+// it creates the directory if it does not exist
 func writeFile(filePath string, contents string) error {
-	// Ensure the directory exists
+	// ensure the directory exists
 	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
