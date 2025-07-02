@@ -32,7 +32,6 @@ import (
 	"k8s.io/client-go/util/homedir"
 
 	"github.com/notaryproject/ratify-containerd/pkg/models"
-	"github.com/notaryproject/ratify-containerd/pkg/utils"
 )
 
 const (
@@ -186,12 +185,9 @@ func writeConfigMapsToSharedVolume(configMaps []*corev1.ConfigMap) error {
 		}
 	}
 
-	// deduplicate scopes for efficient processing
-	deduplicatedScopes := utils.DeduplicateScopes(allScopes)
-	logrus.Infof("Collected %d scopes, deduplicated to %d unique scopes", len(allScopes), len(deduplicatedScopes))
-
 	// convert to optimized format for efficient matching
-	optimizedConfig := models.ToOptimizedFromScopes(deduplicatedScopes)
+	optimizedConfig := models.ToOptimizedFromScopes(allScopes)
+	logrus.Infof("Collected %d scopes, deduplicated to %d unique scopes", len(allScopes), len(optimizedConfig.ScopeMap))
 
 	// marshal to JSON
 	configJSON, err := json.MarshalIndent(optimizedConfig, "", "  ")
