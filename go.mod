@@ -1,4 +1,4 @@
-module github.com/akashsinghal/ratify-containerd
+module github.com/notaryproject/ratify-containerd
 
 go 1.23.0
 

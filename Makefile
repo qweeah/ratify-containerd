@@ -7,7 +7,7 @@ build: build-watcher
 
 .PHONY: build-watcher
 build-watcher: fmt vet
-	go build -o ./bin/${WATCHER_BINARY_NAME}
+	go build -o ./bin/${WATCHER_BINARY_NAME} ./cmd/watcher
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.

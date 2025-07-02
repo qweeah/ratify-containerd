@@ -7,10 +7,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy the source code
-COPY main.go .
+COPY cmd/ ./cmd/
+COPY pkg/ ./pkg/
 
 # Build the watcher binary
-RUN go build -o watcher main.go
+RUN go build -o watcher ./cmd/watcher
 
 # Use a minimal image for runtime
 FROM alpine:3.19
