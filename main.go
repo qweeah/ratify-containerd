@@ -201,3 +201,30 @@ func writeConfigMapsToSharedVolume(configMaps []*corev1.ConfigMap) error {
 	logrus.Infof("Successfully wrote combined configuration to %s with %d unique scopes", configFilePath, len(optimizedConfig.ScopeMap))
 	return nil
 }
+
+// ScopedConfig represents the configuration structure for scoped repositories
+type ScopedConfig struct {
+	Version     string    `json:"version"`     // semver compliant schema version
+	Scopes      []string  `json:"scopes"`      // repositories that need to be verified
+	LastUpdated time.Time `json:"lastUpdated"` // timestamp of last update
+}
+
+// ScopedConfigOptimized represents an optimized structure for efficient scope matching
+// Uses a map for O(1) scope lookups instead of O(n) arraff searches
+type ScopedConfigOptimized struct {
+	ScopeMap    map[string]bool `json:"scopeMap"`    // map for O(1) scope lookups
+	LastUpdated time.Time       `json:"lastUpdated"` // timestamp of last update
+}
+
+// ToOptimizedFromScopes creates a ScopedConfigOptimized from a slice of scopes.
+func ToOptimizedFromScopes(scopes []string) *ScopedConfigOptimized {
+	scopeMap := make(map[string]bool, len(scopes))
+	for _, scope := range scopes {
+		scopeMap[scope] = true
+	}
+
+	return &ScopedConfigOptimized{
+		ScopeMap:    scopeMap,
+		LastUpdated: time.Now().UTC(),
+	}
+}
