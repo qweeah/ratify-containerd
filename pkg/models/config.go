@@ -39,7 +39,7 @@ func (sc *ScopedConfig) ToOptimized() *ScopedConfigOptimized {
 	for _, scope := range sc.Scopes {
 		scopeMap[scope] = true
 	}
-	
+
 	return &ScopedConfigOptimized{
 		ScopeMap:    scopeMap,
 		LastUpdated: sc.LastUpdated,

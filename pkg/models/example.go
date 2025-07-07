@@ -30,12 +30,12 @@ func LoadScopedConfig(filePath string) (*ScopedConfigOptimized, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %v", err)
 	}
-	
+
 	var config ScopedConfigOptimized
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config JSON: %v", err)
 	}
-	
+
 	return &config, nil
 }
 
@@ -53,14 +53,14 @@ func ExampleUsage() {
 		fmt.Printf("Error loading config: %v\n", err)
 		return
 	}
-	
+
 	// Example scopes to check
 	testScopes := []string{
 		"mcr.microsoft.com/azurearck8s/metrics-agent",
 		"docker.io/library/nginx",
 		"mcr.microsoft.com/some/other/image",
 	}
-	
+
 	// Check each scope efficiently (O(1) per check)
 	for _, scope := range testScopes {
 		if CheckScope(config, scope) {
@@ -69,7 +69,7 @@ func ExampleUsage() {
 			fmt.Printf("✗ Scope '%s' is not in verification list\n", scope)
 		}
 	}
-	
+
 	fmt.Printf("Configuration contains %d total scopes\n", len(config.ScopeMap))
 	fmt.Printf("Last updated: %s\n", config.LastUpdated.Format("2006-01-02 15:04:05"))
 }
