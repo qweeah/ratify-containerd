@@ -22,6 +22,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/notaryproject/ratify-containerd/pkg/models"
+	"github.com/notaryproject/ratify-containerd/pkg/shared"
+	"oras.land/oras-go/v2/registry"
 )
 
 // RatifyOutput represents the structure of ratify verify command output
@@ -39,6 +43,7 @@ var (
 
 func init() {
 	// Define command line flags
+	// Implemented after https://github.com/containerd/containerd/blob/061792f0ecf3684fb30a3a0eb006799b8c6638a7/pkg/imageverifier/bindir/bindir.go#L118-L122
 	flag.StringVar(&name, "name", "", "Container image name (required)")
 	flag.StringVar(&digest, "digest", "", "Container image digest (required)")
 	flag.StringVar(&stdinMediaType, "stdin-media-type", "", "Stdin media type")
@@ -60,11 +65,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set HOME environment variable
-	os.Setenv("HOME", "/root")
+	// Parse the registry reference from the name to extract repository
+	ref, err := registry.ParseReference(name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Invalid name format '%s': %v\n", name, err)
+		os.Exit(1)
+	}
+
+	tmpRef := ref
+	tmpRef.Reference = ""
+	if inScope, err := isRepositoryInScope(tmpRef.String()); err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking repository scope: %v\n", err)
+		os.Exit(1)
+	} else if !inScope {
+		fmt.Printf("Repository '%s' is not in scope. Skip checking.\n", tmpRef.String())
+		os.Exit(0)
+	}
 
 	// Set default paths
-	configPath := filepath.Join("/root", ".ratify", "config.json")
+	configPath := shared.RatifyConfigPath
 
 	// Check if ratify config file exists
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -107,8 +126,8 @@ func main() {
 
 func executeRatifyVerify() (string, error) {
 	// Set default paths
-	configPath := filepath.Join("/root", ".ratify", "config.json")
-	ratifyBin := filepath.Join("/root", ".ratify", "bin", "ratify")
+	configPath := shared.RatifyConfigPath
+	ratifyBin := shared.RatifyBinPath
 
 	// Construct the ratify verify command arguments
 	args := []string{"verify", "-c", configPath, "-s", name, "--digest", digest}
@@ -122,7 +141,7 @@ func executeRatifyVerify() (string, error) {
 	cmd := exec.Command(ratifyBin, args...)
 
 	// Set environment variables
-	cmd.Env = append(os.Environ(), "HOME=/root")
+	cmd.Env = append(os.Environ(), fmt.Sprintf("HOME=%s", shared.DefaultHomeDir))
 
 	// Execute the command and capture output
 	output, err := cmd.Output()
@@ -138,6 +157,32 @@ func executeRatifyVerify() (string, error) {
 		}
 		return "", fmt.Errorf("ratify command failed: %v", err)
 	}
-
 	return string(output), nil
+}
+
+// isRepositoryInScope checks if a repository is in the scoped configuration file
+// Returns true if the repository is found in the scope, false otherwise
+func isRepositoryInScope(repository string) (bool, error) {
+	// Construct the path to the scoped config file
+	configFilePath := filepath.Join(shared.SharedVolumePath, shared.ScopedConfigFileName)
+
+	// Check if the config file exists
+	if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
+		return false, fmt.Errorf("scoped config file not found at %s", configFilePath)
+	}
+
+	// Read the config file
+	data, err := os.ReadFile(configFilePath)
+	if err != nil {
+		return false, fmt.Errorf("failed to read scoped config file: %v", err)
+	}
+
+	// Parse the JSON using the existing model
+	var config models.ScopedConfigOptimized
+	if err := json.Unmarshal(data, &config); err != nil {
+		return false, fmt.Errorf("failed to parse scoped config JSON: %v", err)
+	}
+
+	// Check if repository is in scope using the optimized HasScope method
+	return config.HasScope(repository), nil
 }

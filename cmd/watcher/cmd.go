@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/util/homedir"
 
 	"github.com/notaryproject/ratify-containerd/pkg/models"
+	"github.com/notaryproject/ratify-containerd/pkg/shared"
 )
 
 const (
@@ -40,12 +41,6 @@ const (
 
 	// namespace to watch ConfigMaps in， TODO: make this configurable
 	namespace = "default"
-
-	// path to shared ConfigMap, TODO: make this configurable
-	sharedVolumePath = "/shared-data"
-
-	// name of the file to write the combined configuration to
-	scopedConfigFileName = "ratify-config.json"
 )
 
 func main() {
@@ -189,17 +184,17 @@ func cleanupTempFiles(dirPath string) error {
 // writeConfigToSharedVolume atomically writes configuration to shared volume
 // This function ensures atomic writes by using temporary files
 func writeConfigToSharedVolume(configJSON string) error {
-	if err := cleanupTempFiles(sharedVolumePath); err != nil {
+	if err := cleanupTempFiles(shared.SharedVolumePath); err != nil {
 		logrus.Warnf("Failed to cleanup temp files: %v", err)
 		// Continue with write operation even if cleanup fails
 	}
 
-	tempFilePath := filepath.Join(sharedVolumePath, scopedConfigFileName+".tmp")
+	tempFilePath := filepath.Join(shared.SharedVolumePath, shared.ScopedConfigFileName+".tmp")
 	if err := writeFile(tempFilePath, configJSON); err != nil {
 		return fmt.Errorf("failed to write to temp file: %v", err)
 	}
 
-	configMapPath := filepath.Join(sharedVolumePath, scopedConfigFileName)
+	configMapPath := filepath.Join(shared.SharedVolumePath, shared.ScopedConfigFileName)
 	if err := os.Rename(tempFilePath, configMapPath); err != nil {
 		// Clean up temp file on failure
 		os.Remove(tempFilePath)
