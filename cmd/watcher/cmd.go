@@ -43,6 +43,9 @@ const (
 
 	// path to shared ConfigMap, TODO: make this configurable
 	sharedVolumePath = "/shared-data"
+
+	// name of the file to write the combined configuration to
+	scopedConfigFileName = "ratify-config.json"
 )
 
 func main() {
@@ -163,6 +166,50 @@ func writeFile(filePath string, contents string) error {
 	return nil
 }
 
+// cleanupTempFiles removes all *.tmp files from the specified directory
+func cleanupTempFiles(dirPath string) error {
+	pattern := filepath.Join(dirPath, "*.tmp")
+	tmpFiles, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("failed to glob temp files: %v", err)
+	}
+
+	for _, tmpFile := range tmpFiles {
+		if err := os.Remove(tmpFile); err != nil {
+			logrus.Warnf("Failed to remove temp file %s: %v", tmpFile, err)
+			// Continue removing other files even if one fails
+		} else {
+			logrus.Infof("Removed temp file: %s", tmpFile)
+		}
+	}
+
+	return nil
+}
+
+// writeConfigToSharedVolume atomically writes configuration to shared volume
+// This function ensures atomic writes by using temporary files
+func writeConfigToSharedVolume(configJSON string) error {
+	if err := cleanupTempFiles(sharedVolumePath); err != nil {
+		logrus.Warnf("Failed to cleanup temp files: %v", err)
+		// Continue with write operation even if cleanup fails
+	}
+
+	tempFilePath := filepath.Join(sharedVolumePath, scopedConfigFileName+".tmp")
+	if err := writeFile(tempFilePath, configJSON); err != nil {
+		return fmt.Errorf("failed to write to temp file: %v", err)
+	}
+
+	configMapPath := filepath.Join(sharedVolumePath, scopedConfigFileName)
+	if err := os.Rename(tempFilePath, configMapPath); err != nil {
+		// Clean up temp file on failure
+		os.Remove(tempFilePath)
+		return fmt.Errorf("failed to rename temp file to final file: %v", err)
+	}
+
+	logrus.Infof("Successfully wrote configuration to %s", configMapPath)
+	return nil
+}
+
 // writeConfigMapsToSharedVolume writes ConfigMap data to the shared volume
 func writeConfigMapsToSharedVolume(configMaps []*corev1.ConfigMap) error {
 	// collect all scopes from ConfigMaps
@@ -195,12 +242,11 @@ func writeConfigMapsToSharedVolume(configMaps []*corev1.ConfigMap) error {
 		return fmt.Errorf("failed to marshal combined config to JSON: %v", err)
 	}
 
-	// write to shared volume
-	configFilePath := filepath.Join(sharedVolumePath, "ratify-config.json")
-	if err := writeFile(configFilePath, string(configJSON)); err != nil {
+	// write to shared volume atomically
+	if err := writeConfigToSharedVolume(string(configJSON)); err != nil {
 		return fmt.Errorf("failed to write config to shared volume: %v", err)
 	}
 
-	logrus.Infof("Successfully wrote combined configuration to %s with %d unique scopes", configFilePath, len(optimizedConfig.ScopeMap))
+	logrus.Infof("Successfully wrote combined configuration to shared volume with %d unique scopes", len(optimizedConfig.ScopeMap))
 	return nil
 }
