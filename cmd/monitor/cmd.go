@@ -29,6 +29,7 @@ import (
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
@@ -71,10 +72,6 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Create ticker for periodic checks
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
 	// Process initial state
 	logrus.Info("Processing initial ConfigMap state...")
 	if err := processConfigMaps(clientset); err != nil {
@@ -82,25 +79,66 @@ func main() {
 		return
 	}
 
-	// Main monitoring loop
-	logrus.Info("Starting ConfigMap monitoring...")
+	// Start watching for ConfigMap changes
+	logrus.Info("Starting ConfigMap watch...")
+	for {
+		err := watchConfigMaps(clientset, sigChan)
+		if err != nil {
+			logrus.Errorf("ConfigMap watch error: %v", err)
+			logrus.Info("Restarting watch in 5 seconds...")
+			time.Sleep(5 * time.Second)
+		} else {
+			// Normal shutdown
+			break
+		}
+	}
+	logrus.Info("Monitor shutdown complete")
+}
+
+// watchConfigMaps watches for ConfigMap events and processes changes
+func watchConfigMaps(clientset *kubernetes.Clientset, sigChan <-chan os.Signal) error {
+	listOptions := metav1.ListOptions{
+		LabelSelector: "", // Watch all ConfigMaps, we'll filter by prefix
+	}
+
+	watchInterface, err := clientset.CoreV1().ConfigMaps(namespace).Watch(context.TODO(), listOptions)
+	if err != nil {
+		return fmt.Errorf("failed to create ConfigMap watch: %v", err)
+	}
+	defer watchInterface.Stop()
+
+	logrus.Info("ConfigMap watch started successfully")
+
 	for {
 		select {
-		case <-ticker.C:
-			if err := processConfigMaps(clientset); err != nil {
-				logrus.Errorf("Error processing ConfigMaps: %v", err)
+		case event, ok := <-watchInterface.ResultChan():
+			if !ok {
+				return fmt.Errorf("ConfigMap watch channel closed")
+			}
+
+			configMap, ok := event.Object.(*corev1.ConfigMap)
+			if !ok {
+				logrus.Warn("Received non-ConfigMap object from watch")
+				continue
+			}
+
+			// Only process ConfigMaps with our prefix
+			if !strings.HasPrefix(configMap.Name, configMapPrefix) {
+				continue
+			}
+
+			if event.Type == watch.Added || event.Type == watch.Modified || event.Type == watch.Deleted {
+				processConfigMaps(clientset)
+			} else {
+				logrus.Warnf("Received unexpected event type %s for ConfigMap %s", event.Type, configMap.Name)
+				continue
 			}
 		case sig := <-sigChan:
 			logrus.Infof("Received signal %v, shutting down gracefully...", sig)
-			logrus.Info("Monitor shutdown complete")
-			return
+			return nil // Normal shutdown
 		}
 	}
 }
-
-// state tracking
-var lastConfigMapNames = make(map[string]struct{})
-var lastConfigMapVersions = make(map[string]string)
 
 func processConfigMaps(clientset *kubernetes.Clientset) error {
 	// list ConfigMaps in the provided namespace
@@ -109,61 +147,22 @@ func processConfigMaps(clientset *kubernetes.Clientset) error {
 		return fmt.Errorf("failed to list ConfigMaps: %v", err)
 	}
 
-	currentNames := make(map[string]struct{})
-	currentVersions := make(map[string]string)
 	scopedConfigMaps := make([]*corev1.ConfigMap, 0, len(configMaps.Items))
 	for _, cm := range configMaps.Items {
 		if strings.HasPrefix(cm.Name, configMapPrefix) {
-			currentNames[cm.Name] = struct{}{}
-			currentVersions[cm.Name] = cm.ResourceVersion
 			scopedConfigMaps = append(scopedConfigMaps, &cm)
 		}
 	}
 
-	// detect added/removed ConfigMaps
-	nameChanged := false
-	if len(currentNames) != len(lastConfigMapNames) {
-		logrus.Info("Quantity of ConfigMaps changed")
-		nameChanged = true
-	} else {
-		for name := range currentNames {
-			if _, ok := lastConfigMapNames[name]; !ok {
-				logrus.Infof("ConfigMap %s added", name)
-				nameChanged = true
-				break
-			}
-		}
+	logrus.Infof("Processing %d ConfigMaps", len(scopedConfigMaps))
+
+	// process and write ConfigMap data to shared volume
+	err = writeConfigMapsToSharedVolume(scopedConfigMaps)
+	if err != nil {
+		return fmt.Errorf("failed to write ConfigMaps to shared volume: %v", err)
 	}
 
-	// detect content changes if names didn't change
-	contentChanged := false
-	if !nameChanged {
-		for name, version := range currentVersions {
-			if lastConfigMapVersions[name] != version {
-				logrus.Infof("ConfigMap %s content changed (version %s -> %s)", name, lastConfigMapVersions[name], version)
-				contentChanged = true
-				break
-			}
-		}
-	}
-
-	if nameChanged || contentChanged {
-		// on first run or if anything changed, process and write result
-		logrus.Info("ConfigMap set or content changed, processing...")
-
-		// process and write ConfigMap data to shared volume
-		err := writeConfigMapsToSharedVolume(scopedConfigMaps)
-		if err != nil {
-			return fmt.Errorf("failed to write ConfigMaps to shared volume: %v", err)
-		}
-
-		logrus.Infof("Processing %d ConfigMaps", len(scopedConfigMaps))
-		logrus.Infof("Wrote processed config map data to shared volume")
-		// update state
-		lastConfigMapNames = currentNames
-		lastConfigMapVersions = currentVersions
-	}
-	// watch changes to ConfigMaps
+	logrus.Infof("Successfully wrote processed config map data to shared volume")
 	return nil
 }
 
